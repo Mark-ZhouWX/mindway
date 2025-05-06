@@ -811,6 +811,46 @@ class PreTrainedModel(nn.Cell, ModuleUtilsMixin, GenerationMixin, PushToHubMixin
             config._attn_implementation = "sdpa"
         return config
 
+    @classmethod
+    def _from_config(cls, config, **kwargs):
+        """
+        All context managers that the model should be initialized under go here.
+
+        Args:
+            torch_dtype (`torch.dtype`, *optional*):
+                Override the default `torch.dtype` and load the model under this dtype.
+        """
+        # when we init a model from within another model (e.g. VLMs) and dispatch on FA2
+        # a warning is raised that dtype should be fp16. Since we never pass dtype from within
+        # modeling code, we can try to infer it here same way as done in `from_pretrained`
+        mindspore_dtype = kwargs.pop("torch_dtype", config.mindspore_dtype)
+        if isinstance(mindspore_dtype, str):
+            mindspore_dtype = getattr(ms, mindspore_dtype)
+
+        use_flash_attention_2 = kwargs.pop("use_flash_attention_2", False)
+
+        config = copy.deepcopy(config)  # We do not want to modify the config inplace in _from_config.
+
+        if config._attn_implementation_internal is not None:
+            # In this case, the config has been created with the attn_implementation set by the user, which we
+            # should respect.
+            attn_implementation = config._attn_implementation_internal
+        else:
+            attn_implementation = None
+
+        config._attn_implementation = kwargs.pop("attn_implementation", attn_implementation)
+        if not getattr(config, "_attn_implementation_autoset", False):
+            config = cls._autoset_attn_implementation(
+                config,
+                use_flash_attention_2=use_flash_attention_2,
+                check_device_map=False,
+                mindspore_dtype=mindspore_dtype,
+            )
+
+        model = cls(config, **kwargs)
+
+        return model
+
     def get_input_embeddings(self) -> nn.Cell:
         """
         Returns the model's input embeddings.
@@ -1037,6 +1077,9 @@ class PreTrainedModel(nn.Cell, ModuleUtilsMixin, GenerationMixin, PushToHubMixin
         self.config.vocab_size = model_embeds.embedding_table.shape[0]
         self.vocab_size = model_embeds.embedding_table.shape[0]
 
+        # Tie weights again if needed
+        self.tie_weights()
+
         return model_embeds
 
     def _resize_token_embeddings(self, new_num_tokens, pad_to_multiple_of=None):
@@ -1127,7 +1170,6 @@ class PreTrainedModel(nn.Cell, ModuleUtilsMixin, GenerationMixin, PushToHubMixin
             old_embedding_dim,
         )
         new_embeddings.embedding_table.set_dtype(old_embeddings.embedding_table.dtype)
-        # initialize all new embeddings (in particular added tokens)
         self._init_weights(new_embeddings)
 
         # Copy token embeddings from the previous weights
@@ -1135,6 +1177,14 @@ class PreTrainedModel(nn.Cell, ModuleUtilsMixin, GenerationMixin, PushToHubMixin
         # numbers of tokens to copy
         n = min(old_num_tokens, new_num_tokens)
         new_embeddings.embedding_table.data[:n, :] = old_embeddings.embedding_table.data[:n, :]
+
+        # Replace weights in old_embeddings and return to maintain the same embedding type.
+        # This ensures correct functionality when a Custom Embedding class is passed as input.
+        # The input and output embedding types remain consistent. (c.f. https://github.com/huggingface/transformers/pull/31979)
+        old_embeddings.weight.data = new_embeddings.embedding_table.data
+        old_embeddings.num_embeddings = new_embeddings.embedding_table.data.shape[0]
+        if old_embeddings.padding_idx is not None and (new_num_tokens - 1) < old_embeddings.padding_idx:
+            old_embeddings.padding_idx = None
 
         return new_embeddings
 
@@ -1188,7 +1238,6 @@ class PreTrainedModel(nn.Cell, ModuleUtilsMixin, GenerationMixin, PushToHubMixin
             dtype=old_lm_head.weight.dtype,
         )
 
-        # initialize new lm head (in particular added tokens)
         self._init_weights(new_lm_head)
 
         num_tokens_to_copy = min(old_num_tokens, new_num_tokens)
@@ -1231,6 +1280,10 @@ class PreTrainedModel(nn.Cell, ModuleUtilsMixin, GenerationMixin, PushToHubMixin
         if _init_weights:
             # Initialize weights
             self.apply(self._initialize_weights)
+
+            # Tie weights should be skipped when not initializing all weights
+            # since from_pretrained(...) calls tie weights anyways
+            self.tie_weights()
 
         # MindSpore patch. Refresh name of parameters.
         for name, param in self.parameters_and_names():
@@ -2107,6 +2160,10 @@ class PreTrainedModel(nn.Cell, ModuleUtilsMixin, GenerationMixin, PushToHubMixin
         )
 
         model = cls(config, *model_args, **model_kwargs)
+
+        # Make sure to tie the weights correctly
+        model.tie_weights()
+
         # We cannot set default mindspore dtype. So we need to cast model weights after creating.
         if mindspore_dtype is not None:
             model = model.to(mindspore_dtype)
@@ -2154,6 +2211,9 @@ class PreTrainedModel(nn.Cell, ModuleUtilsMixin, GenerationMixin, PushToHubMixin
                 token=token,
                 adapter_kwargs=adapter_kwargs,
             )
+
+        # make sure token embedding weights are still tied if needed
+        model.tie_weights()
 
         # Set model in evaluation mode to deactivate DropOut modules by default
         model.set_train(False)
@@ -2408,6 +2468,55 @@ class PreTrainedModel(nn.Cell, ModuleUtilsMixin, GenerationMixin, PushToHubMixin
             )
 
         return model, missing_keys, unexpected_keys, mismatched_keys, error_msgs
+
+    def retrieve_modules_from_names(self, names, add_prefix=False, remove_prefix=False):
+        module_keys = {".".join(key.split(".")[:-1]) for key in names}
+
+        # torch.nn.ParameterList is a special case where two parameter keywords
+        # are appended to the module name, *e.g.* bert.special_embeddings.0
+        module_keys = module_keys.union(
+            {".".join(key.split(".")[:-2]) for key in names if len(key) > 0 and key[-1].isdigit()}
+        )
+
+        retrieved_modules = []
+        # retrieve all modules that has at least one missing weight name
+        for name, module in self.named_modules():
+            if remove_prefix:
+                _prefix = f"{self.base_model_prefix}."
+                name = name[len(_prefix) :] if name.startswith(_prefix) else name
+            elif add_prefix:
+                name = ".".join([self.base_model_prefix, name]) if len(name) > 0 else self.base_model_prefix
+
+            if name in module_keys:
+                retrieved_modules.append(module)
+
+        return retrieved_modules
+
+    @classmethod
+    def register_for_auto_class(cls, auto_class="AutoModel"):
+        """
+        Register this class with a given auto class. This should only be used for custom models as the ones in the
+        library are already mapped with an auto class.
+
+        <Tip warning={true}>
+
+        This API is experimental and may have some slight breaking changes in the next releases.
+
+        </Tip>
+
+        Args:
+            auto_class (`str` or `type`, *optional*, defaults to `"AutoModel"`):
+                The auto class to register this new model with.
+        """
+        if not isinstance(auto_class, str):
+            auto_class = auto_class.__name__
+
+        import transformers.models.auto as auto_module
+
+        if not hasattr(auto_module, auto_class):
+            raise ValueError(f"{auto_class} is not a valid auto class.")
+
+        cls._auto_class = auto_class
 
     def warn_if_padding_and_no_attention_mask(self, input_ids, attention_mask):
         """
