@@ -49,7 +49,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--prompt", type=str, default="the secret to baking a really good cake is", required=True)
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen3-0.6B-Base", help="Path to the pre-trained model.")
-    parser.add_argument("--attn_implementation", type=str, default="paged_attention", choices=["paged_attention", "flash_attentions_2", "eager"])
+    parser.add_argument("--attn_implementation", type=str, default="paged_attention", choices=["paged_attention", "flash_attention_2", "eager"])
 
     # Parse the arguments
     args = parser.parse_args()
