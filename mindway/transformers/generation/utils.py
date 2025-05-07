@@ -2547,8 +2547,10 @@ class GenerationMixin:
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             # prepare variable output controls (note: some models won't accept all output controls)
-            model_inputs.update({"output_attentions": output_attentions} if output_attentions else {})
-            model_inputs.update({"output_hidden_states": output_hidden_states} if output_hidden_states else {})
+            # Note that this is slightly different from hf transformers, since page attention dose not accept
+            # undeterminante None/bool inputs
+            model_inputs.update({"output_attentions": output_attentions})
+            model_inputs.update({"output_hidden_states": output_hidden_states})
 
             # forward pass to get next token
             outputs = self(
