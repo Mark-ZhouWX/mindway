@@ -42,6 +42,7 @@ from mindway.transformers.generation.logits_process import (
     EncoderNoRepeatNGramLogitsProcessor, NoBadWordsLogitsProcessor, ForcedBOSTokenLogitsProcessor,
     InfNanRemoveLogitsProcessor, ExponentialDecayLengthPenalty, SuppressTokensLogitsProcessor,
     SuppressTokensAtBeginLogitsProcessor, MinPLogitsWarper, TypicalLogitsWarper, EpsilonLogitsWarper, EtaLogitsWarper,
+    ForcedEOSTokenLogitsProcessor,
 )
 from mindway.transformers.generation.stopping_criteria import (
     EosTokenCriteria,
@@ -1063,7 +1064,6 @@ class GenerationMixin:
                     input_ids_seq_length,
                     generation_config.min_new_tokens,
                     generation_config._eos_token_tensor,
-                    device=device,
                 )
             )
         if prefix_allowed_tokens_fn is not None:
@@ -2255,11 +2255,9 @@ class GenerationMixin:
             input_ids_length=input_ids_length,
         )
 
-        # If the model supports `logits_to_keep` in forward(), set it to 1 to avoid computing the whole
-        # logit matrix. This can save a lot of memory during the first forward pass. Note that assisted decoding
-        # dynamically overrides this value as it can need more than the last token logits
-        if self._supports_logits_to_keep() and "logits_to_keep" not in model_kwargs:
-            model_kwargs["logits_to_keep"] = 1
+        # This lines will always select the last logits, which is not the right way for static shape
+        # if self._supports_logits_to_keep() and "logits_to_keep" not in model_kwargs:
+        #     model_kwargs["logits_to_keep"] = 1
 
         self._validate_generated_length(generation_config, input_ids_length, has_default_max_length)
 
@@ -2554,7 +2552,29 @@ class GenerationMixin:
                 **model_inputs,
                 return_dict=False if ms.get_context("mode") == ms.GRAPH_MODE else True,
             )
+            if not isinstance(outputs, CausalLMOutputWithPast):
+                outputs = CausalLMOutputWithPast(
+                    loss=None,
+                    logits=outputs[0],
+                    past_key_values=outputs[1] if model_inputs.get("use_cache", False) else None,
+                )
 
+            # Get the right logits from static shape
+            if (not self._supports_default_dynamic_cache()) and (model_kwargs.get("attention_mask", None) is not None):
+                attention_mask = model_kwargs["attention_mask"]
+                cur_idx = int(attention_mask.sum(-1).max()) - 1
+
+                if outputs.logits.shape[1] == attention_mask.shape[-1]:
+                    next_token_logits = outputs.logits[:, cur_idx, :]  # (bs, seq, dim)
+                else:
+                    next_token_logits = outputs.logits[:, -1, :]
+
+                # `input_ids` obtain effective length after 1st step
+                if input_ids.shape[1] == attention_mask.shape[1]:
+                    input_ids = input_ids[:, : cur_idx + 1]
+
+            else:
+                next_token_logits = outputs.logits[:, -1, :]
             # synced_gpus: don't waste resources running the code we don't need; kwargs must be updated before skipping
             model_kwargs = self._update_model_kwargs_for_generation(
                 outputs,
@@ -2575,30 +2595,6 @@ class GenerationMixin:
                 )
             s_time = time.time()
             step += 1
-
-            if not isinstance(outputs, CausalLMOutputWithPast):
-                outputs = CausalLMOutputWithPast(
-                    loss=None,
-                    logits=outputs[0],
-                    past_key_values=outputs[1] if model_inputs.get("use_cache", False) else None,
-                )
-
-            # Tuple static cache
-            if (not self._supports_default_dynamic_cache()) and (model_kwargs.get("attention_mask", None) is not None):
-                attention_mask = model_kwargs["attention_mask"]
-                cur_idx = int(attention_mask.sum(-1).max()) - 1
-
-                if outputs.logits.shape[1] == attention_mask.shape[-1]:
-                    next_token_logits = outputs.logits[:, cur_idx, :]  # (bs, seq, dim)
-                else:
-                    next_token_logits = outputs.logits[:, -1, :]
-
-                # `input_ids` obtain effective length after 1st step
-                if input_ids.shape[1] == attention_mask.shape[1]:
-                    input_ids = input_ids[:, : cur_idx + 1]
-
-            else:
-                next_token_logits = outputs.logits[:, -1, :]
 
             # pre-process distribution
             next_token_scores = logits_processor(input_ids, next_token_logits)
