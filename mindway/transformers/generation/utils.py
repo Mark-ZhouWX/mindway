@@ -1670,8 +1670,11 @@ class GenerationMixin:
     def _get_initial_cache_position(self, input_ids, model_kwargs):
         """
         Calculates `cache_position` for the pre-fill stage based on `input_ids` and optionally past length
-        shape `(seq_len.)`, the output would be like [0, 1, 2 , 0, 0, 0]
+        shape `(seq_len.)`,
+        when cache is tuple: the output would be like [0, 1, 2 , 0, 0, 0]
+        when cache is none: the output would be like [0, 1, 2, 3, 4, 5]
         """
+        cache = None
         past_length = 0
         if model_kwargs.get("past_key_values") is not None:
             cache = model_kwargs["past_key_values"]
