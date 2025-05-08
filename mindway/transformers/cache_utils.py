@@ -1138,10 +1138,7 @@ class OffloadedStaticCache(StaticCache):
         config: PretrainedConfig,
         max_batch_size: int,
         max_cache_len: Optional[int],
-        device: Optional[str] = None,
         dtype: Optional[ms.Type] = None,
-        offload_device: Optional[str] = None,
-        layer_device_map: Optional[Dict[int]] = None,
     ) -> None:
         super(Cache, self).__init__()
         self.max_batch_size = max_batch_size
