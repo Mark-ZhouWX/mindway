@@ -43,7 +43,7 @@ def _compute_default_rope_parameters(
     attention_factor = 1.0  # Unused in this type of RoPE
 
     # Compute the inverse frequencies
-    inv_freq = 1.0 / (base ** (mint.arange(0, dim, 2, dtype=ms.int32).float() / dim))
+    inv_freq = 1.0 / (base ** (mint.arange(0, dim, 2, dtype=ms.int64).float() / dim))
     return inv_freq, attention_factor
 
 
