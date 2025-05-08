@@ -885,7 +885,7 @@ class PreTrainedModel(nn.Cell, ModuleUtilsMixin, GenerationMixin, PushToHubMixin
         # when we init a model from within another model (e.g. VLMs) and dispatch on FA2
         # a warning is raised that dtype should be fp16. Since we never pass dtype from within
         # modeling code, we can try to infer it here same way as done in `from_pretrained`
-        mindspore_dtype = kwargs.pop("torch_dtype", config.mindspore_dtype)
+        mindspore_dtype = kwargs.pop("torch_dtype", config.torch_dtype)
         if isinstance(mindspore_dtype, str):
             mindspore_dtype = getattr(ms, mindspore_dtype)
 
@@ -905,11 +905,13 @@ class PreTrainedModel(nn.Cell, ModuleUtilsMixin, GenerationMixin, PushToHubMixin
             config = cls._autoset_attn_implementation(
                 config,
                 use_flash_attention_2=use_flash_attention_2,
-                check_device_map=False,
                 mindspore_dtype=mindspore_dtype,
             )
 
         model = cls(config, **kwargs)
+
+        if mindspore_dtype is not None:
+            model = model.to(mindspore_dtype)
 
         return model
 
