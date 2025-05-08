@@ -837,10 +837,8 @@ class HybridCache(Cache):
         config: PretrainedConfig,
         batch_size: int = None,
         max_cache_len: int = None,
-        device: Optional[str] = None,
         dtype: ms.Type = ms.float32,
         max_batch_size: Optional[int] = None,
-        layer_device_map: Optional[Dict[int]] = None,
     ) -> None:
         super().__init__()
         if batch_size is not None:
