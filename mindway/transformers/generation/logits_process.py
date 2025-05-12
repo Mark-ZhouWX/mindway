@@ -2247,8 +2247,6 @@ class WatermarkLogitsProcessor(LogitsProcessor):
     Args:
         vocab_size (`int`):
             The model tokenizer's vocab_size. Used to calculate "green" tokens ratio.
-        device (`str`):
-            The device where model is allocated.
         greenlist_ratio (`float`, optional, *optional*, defaults to 0.25):
             The ratio of "green" tokens used to the vocabulary size. Defaults to 0.25.
         bias (`float`, optional, *optional*, defaults to 2.0):
@@ -2289,7 +2287,7 @@ class WatermarkLogitsProcessor(LogitsProcessor):
 
     >>> # to detect watermarked text use the WatermarkDetector class
     >>> from transformers import WatermarkDetector
-    >>> detector = WatermarkDetector(model_config=model.config, device="cpu", watermarking_config= watermarking_config)
+    >>> detector = WatermarkDetector(model_config=model.config, watermarking_config= watermarking_config)
     >>> detection_preds = detector(out)
     >>> detection_preds
     array([ True])
